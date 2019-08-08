@@ -1,0 +1,215 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nats-server
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nats-server
+rules:
+- apiGroups: [""]
+  resources:
+  - nodes
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nats-server-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nats-server
+subjects:
+- kind: ServiceAccount
+  name: nats-server
+  namespace: default
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  labels:
+    app: nats
+spec:
+  selector:
+    app: nats
+  clusterIP: None
+  ports:
+  - name: client
+    port: 4222
+  - name: cluster
+    port: 6222
+  - name: monitor
+    port: 8222
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-accounts
+data:
+  resolver.conf: |
+    # Nothing here
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-config
+data:
+  nats.conf: |
+    pid_file: "/var/run/nats/nats.pid"
+    http: 8222
+
+    cluster {
+      port: 6222
+      routes [
+        nats://nats:6222
+      ]
+      cluster_advertise: $CLUSTER_ADVERTISE
+      connect_retries: 10
+    }
+
+    debug: true
+    trace: true
+
+    ############################
+    #                          #
+    #  Trusted Operator setup  #
+    #                          #
+    ############################
+    operator: eyJ0eXAiOiJqd3QiLCJhbGciOiJlZDI1NTE5In0.eyJqdGkiOiJQTDNHQVFENlNRRFUyVEZESVNFTzNYTllRNUtBTlVMVk82MlFSR1dUNENEQUs2R1dBNUNBIiwiaWF0IjoxNTY1Mjg4MjM0LCJpc3MiOiJPQ1pLQlYySEpKMlVNWFc1N1FYU0NFU01HTEJFWjNPSDNSSDJVS0hOVU5QSU40TURIMjYyRzRONSIsIm5hbWUiOiJLOFNPUCIsInN1YiI6Ik9DWktCVjJISkoyVU1YVzU3UVhTQ0VTTUdMQkVaM09IM1JIMlVLSE5VTlBJTjRNREgyNjJHNE41IiwidHlwZSI6Im9wZXJhdG9yIiwibmF0cyI6e319.8jYTwM_Cps9e1aLK7lI_K3vST5Tz4pJRs4jEdHCV48vyEAKFOb4IBuqAL1L1o2NtEBkX6KTQctdq5_1e4OaVDw
+    system_account: ADODL76LBF4Q4C2YTXYRUPPFCIR7O3T3HJGRGVKNNDIYNYISLZCHBBCJ
+    resolver: URL(http://account-server:8081/jwt/v1/accounts/)
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: nats
+  labels:
+    app: nats
+spec:
+  selector:
+    matchLabels:
+      app: nats
+  serviceName: nats
+  replicas: 3
+  serviceName: "nats"
+  template:
+    metadata:
+      labels:
+        app: nats
+    spec:
+      # Required to be able to HUP signal and apply config reload
+      # to the server without restarting the pod.
+      shareProcessNamespace: true
+
+      # Required to be able to lookup external public ip
+      # that is setup as the client advertise.
+      serviceAccountName: nats-server
+      initContainers:
+      - command:
+        - nats-pod-bootconfig
+        - -f
+        - /etc/nats-config/advertise/client_advertise.conf
+        - -gf
+        - /etc/nats-config/advertise/gateway_advertise.conf
+        env:
+        - name: KUBERNETES_NODE_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: spec.nodeName
+        image: connecteverything/nats-boot-config:0.5.2
+        imagePullPolicy: IfNotPresent
+        name: bootconfig
+        volumeMounts:
+        - mountPath: /etc/nats-config/advertise
+          name: advertiseconfig
+          subPath: advertise
+
+      # NATS Server + Reloader Sidecar
+      containers:
+      - name: nats
+        image: synadia/nats-server:2.0.2
+        ports:
+        - containerPort: 4222
+          # In case of using the external IP
+          hostPort: 4222
+          name: client
+        - containerPort: 6222
+          name: cluster
+        - containerPort: 8222
+          name: monitor
+        args:
+         - "--config"
+         - "/etc/nats-config/nats.conf"
+
+        # Required to be able to define an environment variable
+        # that refers to other environment variables.  This env var
+        # is later used as part of the configuration file.
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: CLUSTER_ADVERTISE
+          value: $(POD_NAME).nats.$(POD_NAMESPACE).svc
+        volumeMounts:
+          - name: config-volume
+            mountPath: /etc/nats-config
+          - name: accounts-volume
+            mountPath: /etc/nats-config/accounts
+          - name: pid
+            mountPath: /var/run/nats
+          - name: advertiseconfig
+            mountPath: /etc/nats-config/advertise
+            subPath: advertise
+        resources:
+          requests:
+            cpu: 0
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8222
+          initialDelaySeconds: 10
+          timeoutSeconds: 5
+      - name: reloader
+        image: connecteverything/nats-server-config-reloader:0.6.0
+        command:
+         - "nats-server-config-reloader"
+         - "-pid"
+         - "/var/run/nats/nats.pid"
+         - "-config"
+         - "/etc/nats-config/nats.conf"
+         - "-config"
+         - "/etc/nats-config/accounts/resolver.conf"
+        volumeMounts:
+          - name: config-volume
+            mountPath: /etc/nats-config
+          - name: accounts-volume
+            mountPath: /etc/nats-config/accounts
+          - name: pid
+            mountPath: /var/run/nats
+          - name: advertiseconfig
+            mountPath: /etc/nats-config/advertise
+            subPath: advertise
+      volumes:
+      - name: config-volume
+        configMap:
+          name: nats-config
+      - name: accounts-volume
+        configMap:
+          name: nats-accounts
+      - name: pid
+        emptyDir: {}
+      - name: advertiseconfig
+        emptyDir: {}

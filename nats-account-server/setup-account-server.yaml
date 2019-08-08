@@ -1,0 +1,112 @@
+# TODO: sys.creds is a secret
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: account-server-config
+data:
+  operator.jwt: |
+    eyJ0eXAiOiJqd3QiLCJhbGciOiJlZDI1NTE5In0.eyJqdGkiOiJQTDNHQVFENlNRRFUyVEZESVNFTzNYTllRNUtBTlVMVk82MlFSR1dUNENEQUs2R1dBNUNBIiwiaWF0IjoxNTY1Mjg4MjM0LCJpc3MiOiJPQ1pLQlYySEpKMlVNWFc1N1FYU0NFU01HTEJFWjNPSDNSSDJVS0hOVU5QSU40TURIMjYyRzRONSIsIm5hbWUiOiJLOFNPUCIsInN1YiI6Ik9DWktCVjJISkoyVU1YVzU3UVhTQ0VTTUdMQkVaM09IM1JIMlVLSE5VTlBJTjRNREgyNjJHNE41IiwidHlwZSI6Im9wZXJhdG9yIiwibmF0cyI6e319.8jYTwM_Cps9e1aLK7lI_K3vST5Tz4pJRs4jEdHCV48vyEAKFOb4IBuqAL1L1o2NtEBkX6KTQctdq5_1e4OaVDw
+
+  sys.creds: |
+    -----BEGIN NATS USER JWT-----
+    eyJ0eXAiOiJqd3QiLCJhbGciOiJlZDI1NTE5In0.eyJqdGkiOiJHQ0RKV0RLWk9CVEtVRUVZU0ZFVVc1RzYzVVpVWTRTUkdTTk5FT0FGRzVSV0FYRk1VUFJBIiwiaWF0IjoxNTY1Mjg4MjM5LCJpc3MiOiJBRE9ETDc2TEJGNFE0QzJZVFhZUlVQUEZDSVI3TzNUM0hKR1JHVktOTkRJWU5ZSVNMWkNIQkJDSiIsIm5hbWUiOiJzeXMiLCJzdWIiOiJVQ1BTWFZJUUFPUVBITVVIWEdEQTZPWjVNNVhEQ01YNU9QNzNXVk5XMlBaVFY3M1FSUElUQUNUSSIsInR5cGUiOiJ1c2VyIiwibmF0cyI6eyJwdWIiOnt9LCJzdWIiOnt9fX0.cAckkh8FTAS-7c6_IL3RVRE-rdnJqfAEUo54kAdvkW02fHrCdATeWVhj6aO-cBLDRavPm_SjTyP499SXqBZgBw
+    ------END NATS USER JWT------
+    ************************* IMPORTANT *************************
+    NKEY Seed printed below can be used to sign and prove identity.
+    NKEYs are sensitive and should be treated as secrets.
+    -----BEGIN USER NKEY SEED-----
+    SUAHBJB42EUPNDZ43E66IST32WKXHIU72OAITHV52O2Z54LMS7LUBJRP6Y
+    ------END USER NKEY SEED------
+    *************************************************************
+
+  server.conf: |
+    store {
+      dir: "/tmp/accounts",
+      readonly: false,
+      shard: true
+    }
+
+    OperatorJWTPath: "/etc/nats-config/operator.jwt"
+
+    http {
+      host: "0.0.0.0"
+      port: 8081
+    }
+
+    logging {
+      colors: false
+      time: true
+      debug: true
+      trace: true
+    }
+
+    nats {
+      usercredentials: "/etc/nats-config/sys.creds"
+      servers: ["nats://nats:4222"]
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: account-server
+  labels:
+    app: account-server
+spec:
+  selector:
+    app: account-server
+  clusterIP: None
+  ports:
+  - name: client
+    port: 8081
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: account-server
+  labels:
+    app: account-server
+spec:
+  selector:
+    matchLabels:
+      app: account-server
+  serviceName: account-server
+  replicas: 1
+  serviceName: "account-server"
+  template:
+    metadata:
+      labels:
+        app: account-server
+    spec:
+
+      #########################
+      #                       #
+      #  NATS Account Server  #
+      #                       #
+      #########################
+      containers:
+      - name: nats
+        image: synadia/nats-account-server:0.8.0
+        ports:
+        - containerPort: 8081
+          hostPort: 8081
+          name: client
+        args:
+         - "-c"
+         - "/etc/nats-config/server.conf"
+        volumeMounts:
+          - name: config-volume
+            mountPath: /etc/nats-config
+        # resources:
+        #   requests:
+        #     cpu: 0
+        livenessProbe:
+          httpGet:
+            path: /jwt/v1/help
+            port: 8081
+          initialDelaySeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: config-volume
+        configMap:
+          name: account-server-config
